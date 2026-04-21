@@ -201,7 +201,7 @@ To encrypt the `CONNECT` handshake between your laptop and the NLB, you can add 
 ### With TLS enabled
 
 ```
-Your laptop ──TLS──► NLB (port 443) ──TCP──► Squid (port 3128) ──TLS tunnel──► Kiro API
+Your laptop ──TLS──► NLB (port 443) ──TCP──► Squid (port 3128) ──TLS tunnel──► Kiro API (port 443)
 ```
 
 The `CONNECT` handshake is now encrypted between your laptop and the NLB. The NLB terminates TLS and forwards plain TCP to Squid. Squid then tunnels the already-encrypted Kiro traffic to the backend.
