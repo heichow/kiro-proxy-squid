@@ -1,0 +1,416 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  HA Squid forward proxy with NLB + Auto Scaling Group.
+  Squid instances in private subnets with NAT Gateway for outbound.
+  Deploys across 2 AZs in ap-southeast-1 (Singapore).
+  Use the NLB DNS name as HTTPS_PROXY in Kiro IDE.
+
+Parameters:
+  AllowedIP:
+    Type: String
+    Description: >
+      Your laptop's public IP (CIDR format, e.g. 1.2.3.4/32).
+      Find it at https://checkip.amazonaws.com
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid CIDR (e.g. 203.0.113.10/32)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 instance type for Squid nodes
+
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 4
+    Description: Number of Squid instances
+
+Resources:
+  # ==========================================================================
+  # VPC
+  # ==========================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: squid-ha-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: squid-ha-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ==========================================================================
+  # Public Subnets (NLB + NAT Gateway)
+  # ==========================================================================
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: squid-ha-public-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: squid-ha-public-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: squid-ha-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==========================================================================
+  # Private Subnets (Squid instances)
+  # ==========================================================================
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.10.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: squid-ha-private-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.11.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: squid-ha-private-b
+
+  # ==========================================================================
+  # Regional NAT Gateway (auto-scales across AZs, no public subnet needed)
+  # ==========================================================================
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: AttachGateway
+    Properties:
+      ConnectivityType: public
+      AvailabilityMode: regional
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: squid-ha-rnat
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: squid-ha-private-rt
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==========================================================================
+  # Security Groups
+  # ==========================================================================
+  NLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: NLB security group - allow Squid port from your IP
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedIP
+          Description: Squid proxy from your IP (HTTP)
+      Tags:
+        - Key: Name
+          Value: squid-ha-nlb-sg
+
+  SquidSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Squid instances - allow traffic from NLB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3128
+          ToPort: 3128
+          SourceSecurityGroupId: !Ref NLBSecurityGroup
+          Description: Squid from NLB
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound (Kiro API, etc.)
+      Tags:
+        - Key: Name
+          Value: squid-ha-instance-sg
+
+  # ==========================================================================
+  # IAM Role (SSM Session Manager access)
+  # ==========================================================================
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: squid-ha-role
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ==========================================================================
+  # NLB + Target Group
+  # ==========================================================================
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: squid-ha-nlb
+      Scheme: internet-facing
+      Type: network
+      SecurityGroups:
+        - !Ref NLBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: squid-ha-nlb
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: squid-ha-tg
+      Protocol: TCP
+      Port: 3128
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '3128'
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: preserve_client_ip.enabled
+          Value: 'false'
+      Tags:
+        - Key: Name
+          Value: squid-ha-tg
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Protocol: TCP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ==========================================================================
+  # Launch Template + Auto Scaling Group
+  # ==========================================================================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: squid-ha-lt
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref SquidSecurityGroup
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: squid-ha-node
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log) 2>&1
+
+            INSTANCE_ID=$(ec2-metadata -i | cut -d' ' -f2)
+            echo "=== Setting up Squid on $INSTANCE_ID ==="
+
+            dnf install squid -y
+
+            cat > /etc/squid/squid.conf << 'SQUIDCONF'
+            # --- HA Squid Forward Proxy for Kiro IDE ---
+
+            # ACL definitions
+            acl SSL_ports port 443
+            acl Safe_ports port 80
+            acl Safe_ports port 443
+            acl CONNECT method CONNECT
+
+            # Security: deny non-safe ports and CONNECT to non-SSL ports
+            http_access deny !Safe_ports
+            http_access deny CONNECT !SSL_ports
+
+            # Allow all traffic (access restricted by NLB security group)
+            http_access allow all
+
+            # Listen on port 3128
+            http_port 3128
+
+            # Logging
+            access_log /var/log/squid/access.log squid
+            cache_log /var/log/squid/cache.log
+
+            # No caching - pure forward proxy
+            maximum_object_size 0 MB
+            cache deny all
+
+            # Timeouts (generous for streaming LLM responses)
+            connect_timeout 60 seconds
+            read_timeout 600 seconds
+            request_timeout 600 seconds
+
+            # Hide proxy identity
+            via off
+            forwarded_for delete
+            SQUIDCONF
+
+            systemctl enable squid
+            systemctl start squid
+
+            echo "=== Squid setup complete on $INSTANCE_ID ==="
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: squid-ha-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 4
+      DesiredCapacity: !Ref DesiredCapacity
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: squid-ha-node
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT2M
+
+  # ==========================================================================
+  # Scaling Policy - scale on CPU utilization
+  # ALBRequestCountPerTarget only works with ALB, not NLB.
+  # For NLB, use ASGAverageCPUUtilization or ASGAverageNetworkOut.
+  # ==========================================================================
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70
+
+Outputs:
+  ProxyURL:
+    Description: >
+      Set this as HTTPS_PROXY in Kiro IDE settings or environment.
+    Value: !Sub 'http://${NetworkLoadBalancer.DNSName}'
+
+  NLBDnsName:
+    Description: NLB DNS name
+    Value: !GetAtt NetworkLoadBalancer.DNSName
+
+  NLBSecurityGroupId:
+    Description: NLB security group ID (for adding TLS listener rules manually)
+    Value: !Ref NLBSecurityGroup
