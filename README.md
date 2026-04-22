@@ -150,13 +150,6 @@ When you set `HTTPS_PROXY=http://...`, the `http://` only describes how the clie
 
 The only plaintext information is the destination hostname, which is equivalent to what DNS queries already expose. Squid is configured with `via off` and `forwarded_for delete` to strip proxy-identifying headers.
 
-### What the destination sees
-
-The destination (Kiro API) sees the proxy's IP, not your laptop's IP:
-
-- **Single instance**: destination sees the EC2 Elastic IP
-- **HA setup**: destination sees the Regional NAT Gateway's EIP
-
 ---
 
 ## Optional: Adding TLS to the NLB (HA only)
