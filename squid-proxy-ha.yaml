@@ -33,12 +33,26 @@ Parameters:
       - c7g.2xlarge
     Description: EC2 instance type for Squid nodes (Graviton ARM64)
 
-  DesiredCapacity:
+  MaxInstances:
+    Type: Number
+    Default: 8
+    MinValue: 2
+    MaxValue: 20
+    Description: Maximum number of Squid proxy instances in the Auto Scaling Group
+
+  MinInstances:
     Type: Number
     Default: 2
     MinValue: 1
-    MaxValue: 4
-    Description: Number of Squid instances
+    MaxValue: 10
+    Description: Minimum number of Squid proxy instances in the Auto Scaling Group
+
+  InitialInstances:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+    Description: Initial (desired) number of Squid proxy instances at launch
 
 Resources:
   # ==========================================================================
@@ -376,9 +390,9 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
-      MinSize: 1
-      MaxSize: 4
-      DesiredCapacity: !Ref DesiredCapacity
+      MinSize: !Ref MinInstances
+      MaxSize: !Ref MaxInstances
+      DesiredCapacity: !Ref InitialInstances
       VPCZoneIdentifier:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
