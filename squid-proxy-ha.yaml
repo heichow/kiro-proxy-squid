@@ -23,6 +23,14 @@ Parameters:
       - t4g.medium
       - t4g.large
       - t4g.xlarge
+      - m7g.medium
+      - m7g.large
+      - m7g.xlarge
+      - m7g.2xlarge
+      - c7g.medium
+      - c7g.large
+      - c7g.xlarge
+      - c7g.2xlarge
     Description: EC2 instance type for Squid nodes (Graviton ARM64)
 
   DesiredCapacity:
